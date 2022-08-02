@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+  <meta charset="UTF-8">
+  <title>FFTools</title>
+  <meta name="description" content="Browser-Based Editor for Final Fantasy Game Data">
+  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.15.1/css/all.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="css/balloon.css" />
+  <link rel="stylesheet" href="css/fftools.css" />
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.6.2/split.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/css-element-queries/1.2.3/ResizeSensor.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/3.14.1/js-yaml.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/base64-js@1.5.1/base64js.min.js"></script>
+  <script src="romtools/range.js"></script>
+  <script src="romtools/hex-string.js"></script>
+  <script src="romtools/gfx.js"></script>
+  <script src="romtools/data-manager.js"></script>
+  <script src="romtools/observer.js"></script>
+  <script src="gui/editor.js"></script>
+  <script src="gui/menu.js"></script>
+  <script src="gui/modal.js"></script>
+  <script src="gui/navigator.js"></script>
+  <script src="gui/property-list.js"></script>
+  <script src="gui/toolbox.js"></script>
+  <script src="gui/gui.js"></script>
+  <script src="gui/rect.js"></script>
+  <script src="ff4/ff4-battle.js"></script>
+  <script src="ff4/ff4-battle-vram.js"></script>
+  <script src="ff4/ff4-level-prog.js"></script>
+  <script src="ff4/ff4-map.js"></script>
+  <script src="ff4/ff4-map-layer.js"></script>
+  <script src="ff4/ff4-map-tileset.js"></script>
+
+  <script>
+
+  let gui;
+
+  // returns if a value is a string
+  function isString(value) {
+      return typeof value === 'string' || value instanceof String;
+  }
+
+  // returns if a value is really a number
+  function isNumber(value) {
+      return typeof value === 'number' && isFinite(value);
+  }
+
+  // returns if a value is an array
+  function isArray(value) {
+      return value && typeof value === 'object' && value.constructor === Array;
+  }
+
+  function addCommaSep(number) {
+      number = Number(number);
+      if (!isNumber(number)) return 'Invalid number';
+      const numberString = number.toString();
+      return numberString.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  window.onload = function() {
+
+    gui = new GUI();
+
+    // set up splitter for main panes
+    Split(['#left-pane', '#center-pane', '#right-pane'], {
+      sizes: [5, 80, 5],
+      minSize: [256, 0, 256],
+      gutterSize: 5,
+      snapOffset: 0,
+      direction: 'horizontal',
+      elementStyle: function (dimension, size, gutterSize) {
+        return {
+          'flex-shrink': 1,
+          'flex-basis': `calc(${size}% - ${gutterSize}px)`
+        }
+      },
+      gutterStyle: function (dimension, gutterSize) {
+        return {
+          'flex-shrink': 0,
+          'flex-basis': `${gutterSize}px`,
+          'background-color': 'hsl(0, 0%, 30%)'
+        }
+      }
+    });
+
+    // set up splitter for center pane (edit)
+    Split(['#edit-top', '#edit-bottom'], {
+      sizes: [50, 50],
+      minSize: [28, 43],
+      gutterSize: 5,
+      snapOffset: 0,
+      direction: 'vertical',
+      elementStyle: function (dimension, size, gutterSize) {
+        return {
+          'flex-basis': `calc(${size}% - ${gutterSize}px)`
+        }
+      },
+      gutterStyle: function (dimension, gutterSize) {
+        return {
+          'flex-shrink': 0,
+          'flex-basis': `${gutterSize}px`,
+          'background-color': 'hsl(0, 0%, 30%)'
+        }
+      }
+    });
+
+    // set up splitter for right pane (toolbox/properties)
+    Split(['#right-pane-top', '#right-pane-bottom'], {
+      sizes: [25, 75],
+      minSize: [0, 0],
+      gutterSize: 5,
+      snapOffset: 0,
+      direction: 'vertical',
+      elementStyle: function (dimension, size, gutterSize, index) {
+        if (index === 0) {
+          return {
+            'flex-basis': `calc(${size}% - ${gutterSize}px)`
+          };
+        } else {
+          return {};
+        }
+      },
+      gutterStyle: function (dimension, gutterSize) {
+        return {
+          'flex-shrink': 0,
+          'flex-basis': `${gutterSize}px`,
+          'background-color': 'hsl(0, 0%, 30%)'
+        }
+      }
+    });
+
+    const openBtn = document.getElementById('open-btn');
+    openBtn.onchange = open;
+
+    document.addEventListener('keydown', function(e) {
+      if (e.which === 90 && (e.metaKey || e.ctrlKey)) {
+        // Ctrl+Z
+        e.preventDefault();
+        e.shiftKey ? redo() : undo();
+      } else if (e.which === 89 && (e.metaKey || e.ctrlKey)) {
+        // Ctrl+Y
+        e.preventDefault();
+        redo();
+      } else if (e.which === 79 && (e.metaKey || e.ctrlKey)) {
+        // Ctrl+O
+        e.preventDefault();
+        document.getElementById('open-btn').click();
+      } else if (e.which === 83 && (e.metaKey || e.ctrlKey)) {
+        // Ctrl+S
+        e.preventDefault();
+        saveROM();
+      }
+    });
+  }
+
+  window.onbeforeunload = function() {
+    return 'Are you sure you want to leave?';
+  };
+
+  function open() {
+    const openBtn = document.getElementById('open-btn');
+    if (!openBtn || !openBtn.files[0]) return;
+    const file = openBtn.files[0];
+    openBtn.value = null;
+    const filereader = new FileReader();
+    filereader.readAsText(file);
+    filereader.onload = function() {
+      const textBuffer = filereader.result;
+      let data;
+      try {
+        data = JSON.parse(textBuffer);
+        dataMgr = new ROMDataManager(data);
+        gui.init(dataMgr);
+      } catch(e) {
+        const content = gui.modal.open('Open');
+        content.innerHTML = `Invalid data file: ${e}`;
+      }
+    };
+  }
+
+  function save() {
+    dataMgr.markDirty();
+
+    const text = JSON.stringify(dataMgr.data, null, 2);
+    const blob = new Blob([text]);
+
+    const a = document.createElement('a');
+    a.style = 'display: none';
+    document.body.appendChild(a);
+
+    a.href = window.URL.createObjectURL(blob);
+    a.download = `${dataMgr.data.key}-data.json`;
+    a.click();
+
+    // release the reference to the file by revoking the Object URL
+    window.URL.revokeObjectURL(a.href);
+  }
+
+  function undo() {
+    gui.dataMgr.undo();
+  }
+
+  function redo() {
+    gui.dataMgr.redo();
+  }
+
+  function showSettings() {
+    gui.modal.open('Settings');
+  }
+
+  function showAbout() {
+    const content = gui.modal.open('About');
+    content.innerHTML = 'FFTools';
+  }
+
+  </script>
+</head>
+
+<body>
+  <div id="outer">
+    <div id="topbar">
+      <button class="icon-btn float-left"
+      onclick="document.getElementById('open-btn').click();"
+      aria-label="Open ROM"
+      data-balloon-pos="down-left">
+        <i class="fas fa-folder-open"></i>
+      </button>
+      <input id="open-btn"
+      type="file"
+      style="display:none;"
+      name="file"/>
+      <button class="icon-btn float-left"
+      onclick="save()"
+      aria-label="Save ROM"
+      data-balloon-pos="down">
+        <i class="fas fa-save"></i>
+      </button>
+      <button class="icon-btn float-left"
+      onclick="undo()"
+      aria-label="Undo"
+      data-balloon-pos="down">
+        <i class="fas fa-undo"></i>
+      </button>
+      <button class="icon-btn float-left"
+      onclick="redo()"
+      aria-label="Redo"
+      data-balloon-pos="down">
+        <i class="fas fa-redo"></i>
+      </button>
+      <button class="icon-btn float-left"
+      onclick="showSettings()"
+      aria-label="ROM Settings"
+      data-balloon-pos="down">
+        <i class="fas fa-cog"></i>
+      </button>
+      <button class="icon-btn float-left"
+      onclick="showAbout()"
+      aria-label="About FF6Tools"
+      data-balloon-pos="down">
+        <i class="fas fa-question"></i>
+      </button>
+
+      <button class="icon-btn float-right"
+      onclick="togglePane('right-pane')"
+      aria-label="Show/Hide Toolbox/Properties"
+      data-balloon-pos="down-right">
+        <i class="fas fa-angle-double-right"></i>
+      </button>
+      <button class="icon-btn float-right"
+      onclick="togglePane('edit-bottom')"
+      aria-label="Show/Hide Script"
+      data-balloon-pos="down-right">
+        <i class="fas fa-angle-double-down"></i>
+      </button>
+      <button class="icon-btn float-right"
+      onclick="togglePane('left-pane')"
+      aria-label="Show/Hide Navigator"
+      data-balloon-pos="down">
+        <i class="fas fa-angle-double-left"></i>
+      </button>
+    </div>
+
+    <div id="main">
+      <div id="left-pane"></div>
+
+      <div id="center-pane">
+        <div id="edit-top" class="background-gradient">
+          <div id="edit-controls" class="hidden"></div>
+          <div id="edit-div" class="no-select"></div>
+        </div>
+
+        <div id="edit-bottom" class="hidden">
+          <div id="script-bar">
+            <button id="script-insert" class="icon-btn">
+              <i class="fas fa-plus"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.delete()">
+              <i class="fas fa-minus"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.moveUp()">
+              <i class="fas fa-arrow-up"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.moveDown()">
+              <i class="fas fa-arrow-down"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.cut()">
+              <i class="fas fa-cut"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.copy()">
+              <i class="fas fa-copy"></i>
+            </button>
+            <button class="icon-btn" onclick="scriptList.paste()">
+              <i class="fas fa-paste"></i>
+            </button>
+          </div>
+          <div id="script-div">
+            <ul id="script-list" class="no-select"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div id="right-pane">
+
+        <div id="right-pane-top">
+          <div id="toolbox-bar">
+            <button class="toolbox-button selected" value="0">Layer 1</button>
+            <button class="toolbox-button" value="1">Layer 2</button>
+            <button class="toolbox-button" value="2">Layer 3</button>
+            <button class="toolbox-button" value="3">Triggers</button>
+          </div>
+          <div id="toolbox" class="no-select hidden"></div>
+        </div>
+
+        <div id="right-pane-bottom">
+          <div id="properties-bar">
+            <button class="icon-btn"
+            disabled onclick="propList.selectPrevious()"
+            aria-label="Select Previous"
+            data-balloon-pos="down-left">
+              <i class="fas fa-arrow-left"></i>
+            </button>
+            <button class="icon-btn"
+            disabled onclick="propList.selectNext()"
+            aria-label="Select Next"
+            data-balloon-pos="down">
+              <i class="fas fa-arrow-right"></i>
+            </button>
+          </div>
+          <div id="properties"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="menu-div"></div>
+
+  <div id="modal">
+    <div id="modal-window">
+      <span id="modal-close">
+        <i class="fas fa-times"></i>
+      </span>
+      <p id="modal-title"></p>
+      <div id="modal-content"></div>
+    </div>
+  </div>
+</body>
+</html>
